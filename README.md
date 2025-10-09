@@ -1,0 +1,2 @@
+# lwproxy
+Luanti-wasm proxy
