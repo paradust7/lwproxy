@@ -1,2 +1,1 @@
-mod listener;
-pub use listener::WebTransportProxyListener;
+pub mod listener;

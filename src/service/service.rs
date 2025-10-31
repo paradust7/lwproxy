@@ -1,12 +1,21 @@
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+
+use super::vpn::packet::VpnPacket;
+use crate::service::vpn::lease::VpnLease;
+use crate::service::vpn::vpn::VpnCode;
+use crate::service::vpn::vpn::VpnConfig;
 
 use super::client::ClientId;
 use super::client::ProxyClient;
 use super::client::ProxyClientHandle;
 use super::client::RemoteInfo;
+use super::vpn::router::VPNRouter;
+use rand::Rng;
 
 #[derive(Clone)]
 pub struct ProxyServiceHandle {
@@ -29,11 +38,25 @@ impl ProxyServiceHandle {
         guard.remove_client(client).await
     }
 
-    pub async fn make_vpn(&self, game: &str) -> (String, String) {
+    pub async fn make_vpn(&self, game: &str) -> Arc<VpnConfig> {
         let mut guard = self.inner.lock().await;
         guard.make_vpn(game).await
     }
 
+    pub async fn get_vpn_info(&self, code: &str) -> Option<Arc<VpnConfig>> {
+        let mut guard = self.inner.lock().await;
+        guard.get_vpn_info(code).await
+    }
+
+    pub async fn vpn_route(
+        &self,
+        code: &VpnCode,
+        bind_port: u16,
+        relay_tx: UnboundedSender<VpnPacket>,
+    ) -> Option<VpnLease> {
+        let guard = self.inner.lock().await;
+        guard.vpn_route(code, bind_port, relay_tx).await
+    }
     async fn run(self) {
         // Nothing yet
     }
@@ -42,6 +65,7 @@ impl ProxyServiceHandle {
 pub struct ProxyService {
     next_client_id: ClientId,
     clients: HashMap<ClientId, ProxyClientHandle>,
+    vpn_router: VPNRouter,
 }
 
 impl ProxyService {
@@ -49,6 +73,7 @@ impl ProxyService {
         Self {
             next_client_id: 1,
             clients: HashMap::new(),
+            vpn_router: VPNRouter::new(),
         }
     }
 
@@ -75,7 +100,26 @@ impl ProxyService {
         };
     }
 
-    pub async fn make_vpn(&mut self, game: &str) -> (String, String) {
-        todo!()
+    pub async fn make_vpn(&mut self, game: &str) -> Arc<VpnConfig> {
+        self.vpn_router.make_vpn(game).await
+    }
+
+    pub async fn get_vpn_info(&mut self, hexcode: &str) -> Option<Arc<VpnConfig>> {
+        match VpnCode::from(hexcode) {
+            Ok(code) => self.vpn_router.get_vpn_info(&code).await,
+            Err(_) => {
+                // Ignore invalid vpn codes
+                None
+            }
+        }
+    }
+
+    pub async fn vpn_route(
+        &self,
+        code: &VpnCode,
+        bind_port: u16,
+        relay_tx: UnboundedSender<VpnPacket>,
+    ) -> Option<VpnLease> {
+        self.vpn_router.route(code, bind_port, relay_tx).await
     }
 }

@@ -5,6 +5,7 @@ use rustls::pki_types::CertificateDer;
 use rustls::pki_types::PrivateKeyDer;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
 pub struct WebSocketProxyListener {
@@ -45,20 +46,20 @@ impl WebSocketProxyListener {
         })
     }
 
-    pub async fn start(&mut self) -> anyhow::Result<()> {
+    pub async fn start(&mut self) -> anyhow::Result<JoinHandle<()>> {
         assert!(self.runner.is_none());
         let listener = TcpListener::bind(&self.bind_addr).await?;
+        log::info!("WebSocket server started (bind addr {})", self.bind_addr);
         let runner = WebSocketProxyRunner::new(self.service.clone(), listener, self.tls.clone())
             .run()
             .await;
         self.runner = Some(runner);
-        Ok(())
+        Ok(self.runner.as_mut().unwrap().join.take().unwrap())
     }
 
-    pub async fn stop(self) -> anyhow::Result<()> {
-        if let Some(runner) = self.runner {
-            runner.stop.send(true);
-            runner.join.await?;
+    pub async fn stop(&self) -> anyhow::Result<()> {
+        if let Some(runner) = &self.runner {
+            runner.stop.send(true)?;
         }
         Ok(())
     }
