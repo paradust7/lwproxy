@@ -5,6 +5,7 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use chrono::DateTime;
 use chrono::Utc;
 use rand::Rng;
@@ -12,7 +13,9 @@ use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use super::lease::VpnLease;
+use crate::service::lease::ProxyLease;
+
+use super::lease::VpnLeaseHandler;
 use super::packet::VpnPacket;
 
 #[derive(Hash, PartialEq, Eq, Copy, Clone)]
@@ -59,9 +62,9 @@ impl VpnHandle {
     pub async fn add_route(
         &self,
         addr: SocketAddr,
-        relay: mpsc::UnboundedSender<VpnPacket>,
-    ) -> VpnLease {
-        let target = Arc::new(VpnTarget { relay });
+        relay: mpsc::UnboundedSender<Bytes>,
+    ) -> ProxyLease {
+        let target = Arc::new(VpnTarget { addr, relay });
         let mut guard = self.runtime.lock().await;
         guard.rtable.insert(addr, target);
         drop(guard);
@@ -71,11 +74,11 @@ impl VpnHandle {
             guard.transmitter.as_ref().map(|t| t.clone()).unwrap()
         };
 
-        VpnLease {
+        ProxyLease::new(VpnLeaseHandler {
             addr,
             vpn: self.inner.clone(),
             transmit: transmitter,
-        }
+        })
     }
 
     pub async fn assign_ip(&self, code: &VpnCode) -> IpAddr {
@@ -85,7 +88,8 @@ impl VpnHandle {
 }
 
 struct VpnTarget {
-    relay: mpsc::UnboundedSender<VpnPacket>,
+    addr: SocketAddr,
+    relay: mpsc::UnboundedSender<Bytes>,
 }
 
 pub struct Vpn {
@@ -128,7 +132,7 @@ impl Vpn {
         }
     }
 
-    pub async fn start(&mut self) {
+    pub fn start(&mut self) {
         let config = self.config.clone();
         let runtime = self.runtime.clone();
         let mut receiver = self.receiver.take().unwrap();
@@ -141,12 +145,23 @@ impl Vpn {
             while let Some(packet) = receiver.recv().await {
                 match &packet {
                     VpnPacket::VpnStop => break,
+                    VpnPacket::VpnDisconnect(addr) => {
+                        let mut guard = runtime.lock().await;
+                        guard.rtable.remove(&addr);
+                    }
                     VpnPacket::Udp(vpn_packet_udp) => {
-                        let guard = runtime.lock().await;
-                        if let Some(target) = guard.rtable.get(&vpn_packet_udp.to) {
-                            target.relay.send(packet);
+                        let mut guard = runtime.lock().await;
+                        let target_addr = vpn_packet_udp.to;
+                        let mut failed = false;
+                        if let Some(target) = guard.rtable.get(&target_addr) {
+                            if target.relay.send(vpn_packet_udp.encode1()).is_err() {
+                                failed = true;
+                            }
                         }
-                        // If no routes match, the packet goes nowhere.
+                        if failed {
+                            // Client disconnected
+                            guard.rtable.remove(&target_addr);
+                        }
                     }
                 }
             }

@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::net::SocketAddrV4;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::Mutex;
 
-use crate::service::vpn::lease::VpnLease;
-use crate::service::vpn::packet::VpnPacket;
+use crate::service::lease::ProxyLease;
 use crate::service::vpn::vpn::Vpn;
 use crate::service::vpn::vpn::VpnCode;
 use crate::service::vpn::vpn::VpnConfig;
@@ -48,8 +46,8 @@ impl VPNRouter {
         &self,
         code: &VpnCode,
         bind_port: u16,
-        relay_tx: UnboundedSender<VpnPacket>,
-    ) -> Option<VpnLease> {
+        relay_tx: UnboundedSender<Bytes>,
+    ) -> Option<ProxyLease> {
         match self.codes.get(code) {
             Some(vpn) => {
                 let ip = vpn.assign_ip(code).await;

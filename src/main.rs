@@ -1,5 +1,3 @@
-#![feature(ip_as_octets)]
-
 use std::fs;
 use std::io;
 use std::path;
@@ -7,23 +5,25 @@ use std::path;
 use anyhow::Context;
 
 use clap::Parser;
+use config::Config;
 use rustls::pki_types::CertificateDer;
 
 mod service;
+mod settings;
 mod websocket;
 mod webtransport;
 
 use rustls::pki_types::PrivateKeyDer;
 use websocket::listener::WebSocketProxyListener;
-use webtransport::listener::WebTransportProxyListener;
 
 use crate::service::ProxyService;
+use crate::settings::Settings;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// WebSocket (HTTP/1.1) bind address and port
-    #[arg(long, default_value = "[::]:8888")]
+    #[arg(long, default_value = "[::]:7777")]
     ws_addr: std::net::SocketAddr,
 
     /// Use HTTPS for websocket
@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
     let env = env_logger::Env::default().default_filter_or("info");
     env_logger::init_from_env(env);
 
+    Settings::load()?;
     let args = Args::parse();
 
     // Prevents https://github.com/snapview/tokio-tungstenite/issues/336

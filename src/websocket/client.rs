@@ -1,6 +1,6 @@
-use crate::service::vpn::lease::VpnLease;
-use crate::service::vpn::packet::VpnPacket;
-use crate::service::vpn::packet::VpnPacketUdp;
+use std::net::Ipv4Addr;
+
+use crate::service::lease::ProxyLease;
 use crate::service::vpn::vpn::VpnCode;
 use crate::service::ProxyServiceHandle;
 use anyhow::Context;
@@ -25,8 +25,8 @@ pub struct WebSocketClientRunner {
     service: ProxyServiceHandle,
     tls: Option<TlsAcceptor>,
     stream: Option<TcpStream>,
-    relay_tx: Option<UnboundedSender<VpnPacket>>,
-    lease: Option<VpnLease>,
+    relay_tx: Option<UnboundedSender<Bytes>>,
+    lease: Option<ProxyLease>,
 }
 
 impl WebSocketClientRunner {
@@ -49,6 +49,8 @@ impl WebSocketClientRunner {
     pub fn run(self) {
         tokio::spawn(async move {
             let mut client = self;
+            let remote_addr = client.stream.as_ref().unwrap().peer_addr().unwrap();
+            log::info!("WS{}: Connect from {}", client.wsid, remote_addr);
             if let Err(err) = client.run_inner().await {
                 log::error!("WS{}: WebSocket error: {}", client.wsid, err);
             }
@@ -87,52 +89,61 @@ impl WebSocketClientRunner {
     {
         let ws_stream = tokio_tungstenite::accept_async(stream).await?;
         let (mut writer, mut reader) = ws_stream.split();
-        let (relay_tx, mut relay_rx) = tokio::sync::mpsc::unbounded_channel::<VpnPacket>();
+        let (relay_tx, mut relay_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
         self.relay_tx = Some(relay_tx);
 
-        tokio::select! {
-            msg = reader.next() => {
-                match msg {
-                    Some(Ok(msg)) => {
-                        let did_close = self.handle_message(msg, &mut writer).await?;
-                        if did_close {
+        loop {
+            tokio::select! {
+                msg = reader.next() => {
+                    match msg {
+                        Some(Ok(msg)) => {
+                            let did_close = self.handle_message(msg, &mut writer).await?;
+                            if did_close {
+                                return Ok(());
+                            }
+                        },
+                        Some(Err(err)) => {
+                            // Websocket errors are always fatal.
+                            anyhow::bail!(err);
+                        },
+                        None => {
+                            anyhow::bail!("Already closed?");
+                        },
+                    }
+                },
+                r = relay_rx.recv() => {
+                    match r {
+                        Some(data) => {
+                            if data.len() == 0 {
+                                // This might signal the end of the lease.
+                                if let Some(lease) = &self.lease {
+                                    if !lease.is_live() {
+                                        let response = CloseFrame {
+                                            code: CloseCode::Normal,
+                                            reason: Utf8Bytes::from_static("Done"),
+                                        };
+                                        writer.send(Message::Close(Some(response))).await?;
+                                        writer.close().await?;
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            writer.send(Message::Binary(data)).await?;
+                        }
+                        None => {
+                            // The relay is shutdown to indicate close
+                            let response = CloseFrame {
+                                code: CloseCode::Normal,
+                                reason: Utf8Bytes::from_static("Done"),
+                            };
+                            writer.send(Message::Close(Some(response))).await?;
+                            writer.close().await?;
                             return Ok(());
                         }
-                    },
-                    Some(Err(err)) => {
-                        // Websocket errors are always fatal.
-                        anyhow::bail!(err);
-                    },
-                    None => {
-                        anyhow::bail!("Already closed?");
-                    },
-                }
-            },
-            r = relay_rx.recv() => {
-                match r {
-                    Some(packet) => {
-                        match packet {
-                            VpnPacket::VpnStop => panic!("This should never happen"),
-                            VpnPacket::Udp(vpn_packet_udp) => {
-                                writer.send(Message::Binary(vpn_packet_udp.encode1())).await?;
-                            },
-                        }
-                    },
-                    None => {
-                        // The relay is shutdown to indicate close
-                        let response = CloseFrame {
-                            code: CloseCode::Normal,
-                            reason: Utf8Bytes::from_static("Done"),
-                        };
-                        writer.send(Message::Close(Some(response))).await?;
-                        writer.close().await?;
-                        return Ok(());
                     }
                 }
             }
         }
-
-        Ok(())
     }
 
     async fn handle_message<S>(
@@ -186,7 +197,10 @@ impl WebSocketClientRunner {
         if !raw.is_ascii() {
             anyhow::bail!("Command contains non-ascii characters");
         }
-        if raw.starts_with("PING ") {
+        if raw.len() > 255 {
+            anyhow::bail!("Command too long");
+        }
+        if raw.starts_with("PING") {
             // Change PING to PONG and reply the same message.
             let mut response: String = raw.to_string();
             response.replace_range(1..2, "O");
@@ -201,6 +215,23 @@ impl WebSocketClientRunner {
         }
         let response: String;
         match tokens.iter().next() {
+            Some(&"PROXY") => {
+                if tokens.len() != 5 {
+                    anyhow::bail!("Bad args to PROXY command");
+                }
+                if tokens[1] != "IPV4" {
+                    anyhow::bail!("Bad protocol in PROXY command")
+                }
+                let is_udp = match tokens[2] {
+                    "TCP" => false,
+                    "UDP" => true,
+                    _ => anyhow::bail!("Bad transport in PROXY command"),
+                };
+                let ip: Ipv4Addr = tokens[3].parse().context("Bad address in PROXY command")?;
+                let port: u16 = tokens[4].parse().context("Bad port in PROXY command")?;
+                //self.service.route()
+                todo!();
+            }
             Some(&"MAKEVPN") => {
                 if tokens.len() != 2 {
                     anyhow::bail!("Bad args to MAKEVPN");
@@ -238,10 +269,15 @@ impl WebSocketClientRunner {
                 let bind_port: u16 = tokens[5].parse().context("Bind port parse")?;
                 let code = VpnCode::from(hexcode).context("VpnCode parse error")?;
 
-                let lease = self
+                self.lease = self
                     .service
-                    .vpn_route(&code, bind_port, self.relay_tx.take().unwrap());
-                response = format!("BIND OK");
+                    .vpn_route(&code, bind_port, self.relay_tx.take().unwrap())
+                    .await;
+                if self.lease.is_some() {
+                    response = format!("BIND OK");
+                } else {
+                    response = format!("BIND FAILED");
+                }
             }
             _ => {
                 anyhow::bail!("Unrecognized command: {}", tokens[0]);
@@ -256,9 +292,7 @@ impl WebSocketClientRunner {
     async fn handle_datagram(&mut self, bytes: Bytes) -> anyhow::Result<()> {
         match &self.lease {
             Some(lease) => {
-                let mut packet = VpnPacketUdp::decode1(bytes)?;
-                packet.from = lease.addr;
-                lease.send(VpnPacket::Udp(packet))?;
+                lease.send(bytes)?;
                 Ok(())
             }
             None => {

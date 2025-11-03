@@ -1,0 +1,7 @@
+services:
+  lwproxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: app
+    network_mode: bridge

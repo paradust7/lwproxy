@@ -14,6 +14,7 @@ pub struct VpnPacketUdp {
 }
 pub enum VpnPacket {
     VpnStop,
+    VpnDisconnect(SocketAddr),
     Udp(VpnPacketUdp),
 }
 
@@ -24,7 +25,10 @@ impl VpnPacketUdp {
     pub fn encode1(&self) -> Bytes {
         let mut buffer = BytesMut::with_capacity(4 + 4 + 2 + 2 + self.data.len());
         buffer.put_u32(Self::MAGIC1); // Magic prefix
-        buffer.put(self.from.ip().as_octets());
+        match self.from.ip() {
+            IpAddr::V4(ipv4_addr) => buffer.put_u32(ipv4_addr.to_bits()),
+            IpAddr::V6(_) => panic!("IPv6 not handled in encode1"),
+        }
         buffer.put_u16(self.from.port());
         buffer.put_u16(self.data.len() as u16);
         buffer.put_slice(&self.data);

@@ -39,7 +39,6 @@ impl WebSocketProxyRunner {
     }
 
     async fn run_inner(self, stop_recv: tokio::sync::watch::Receiver<bool>) {
-        //tokio::select! {}
         let mut wsid: u64 = 1;
         while let Ok((stream, _)) = self.listener.accept().await {
             let service = self.service.clone();

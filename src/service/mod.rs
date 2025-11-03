@@ -1,5 +1,7 @@
-mod client;
-mod service;
+pub mod client;
+pub mod connectproxy;
+pub mod lease;
+pub mod service;
 pub mod vpn;
 pub use client::ProxyClientHandle;
 pub use client::RemoteInfo;

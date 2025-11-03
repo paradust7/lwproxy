@@ -1,12 +1,12 @@
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use super::vpn::packet::VpnPacket;
-use crate::service::vpn::lease::VpnLease;
+use crate::service::lease::ProxyLease;
 use crate::service::vpn::vpn::VpnCode;
 use crate::service::vpn::vpn::VpnConfig;
 
@@ -15,7 +15,6 @@ use super::client::ProxyClient;
 use super::client::ProxyClientHandle;
 use super::client::RemoteInfo;
 use super::vpn::router::VPNRouter;
-use rand::Rng;
 
 #[derive(Clone)]
 pub struct ProxyServiceHandle {
@@ -52,10 +51,20 @@ impl ProxyServiceHandle {
         &self,
         code: &VpnCode,
         bind_port: u16,
-        relay_tx: UnboundedSender<VpnPacket>,
-    ) -> Option<VpnLease> {
+        relay_tx: UnboundedSender<Bytes>,
+    ) -> Option<ProxyLease> {
         let guard = self.inner.lock().await;
         guard.vpn_route(code, bind_port, relay_tx).await
+    }
+
+    pub async fn route(
+        &self,
+        addr: SocketAddr,
+        is_udp: bool,
+        relay_tx: UnboundedSender<Bytes>,
+    ) -> Option<ProxyLease> {
+        let guard = self.inner.lock().await;
+        guard.route(addr, is_udp, relay_tx).await
     }
     async fn run(self) {
         // Nothing yet
@@ -118,8 +127,17 @@ impl ProxyService {
         &self,
         code: &VpnCode,
         bind_port: u16,
-        relay_tx: UnboundedSender<VpnPacket>,
-    ) -> Option<VpnLease> {
+        relay_tx: UnboundedSender<Bytes>,
+    ) -> Option<ProxyLease> {
         self.vpn_router.route(code, bind_port, relay_tx).await
+    }
+
+    pub async fn route(
+        &self,
+        addr: SocketAddr,
+        is_udp: bool,
+        relay_tx: UnboundedSender<Bytes>,
+    ) -> Option<ProxyLease> {
+        None
     }
 }
