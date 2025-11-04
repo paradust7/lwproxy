@@ -109,7 +109,7 @@ impl ConnectProxy {
                                 if Self::header_complete(&buf) {
                                     // Process the header and establish the link
                                     let (header, remainder) = Self::parse_header(buf.freeze())?;
-                                    if !settings.allowed_hosts.contains(&header.host) {
+                                    if !settings.http_proxy.allowed_hosts.contains(&header.host) {
                                         anyhow::bail!("Host not allowed in CONNECT proxy");
                                     }
                                     let desc: (&str, u16) = (&header.host, header.port);

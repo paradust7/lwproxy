@@ -14,6 +14,7 @@ mod websocket;
 mod webtransport;
 
 use rustls::pki_types::PrivateKeyDer;
+use tokio::task::JoinHandle;
 use websocket::listener::WebSocketProxyListener;
 
 use crate::service::ProxyService;
@@ -22,25 +23,8 @@ use crate::settings::Settings;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// WebSocket (HTTP/1.1) bind address and port
-    #[arg(long, default_value = "[::]:7777")]
-    ws_addr: std::net::SocketAddr,
-
-    /// Use HTTPS for websocket
-    #[arg(long, default_value = "false")]
-    ws_secure: bool,
-
-    /// WebTransport (HTTP/3 + SSL over UDP) bind address and port
-    #[arg(short, long, default_value = "[::]:1443")]
-    wt_addr: std::net::SocketAddr,
-
-    /// Use the certificates at this path, encoded as PEM.
-    #[arg(long, default_value = None)]
-    pub tls_cert: Option<path::PathBuf>,
-
-    /// Use the private key at this path, encoded as PEM.
-    #[arg(long, default_value = None)]
-    pub tls_key: Option<path::PathBuf>,
+    #[arg(long, default_value = "settings.toml")]
+    pub config: path::PathBuf,
 }
 
 pub struct CertData {
@@ -48,25 +32,30 @@ pub struct CertData {
     pub key: PrivateKeyDer<'static>,
 }
 
-fn read_certs(args: &Args) -> anyhow::Result<CertData> {
+fn read_certs(tls_cert: &path::PathBuf, tls_key: &path::PathBuf) -> anyhow::Result<CertData> {
     // Read PEM certificate chain
-    let chain =
-        fs::File::open(args.tls_cert.as_ref().unwrap()).context("failed to open cert file")?;
+    let chain = fs::File::open(tls_cert)
+        .with_context(|| format!("failed to open {}", tls_cert.display()))?;
     let mut chain = io::BufReader::new(chain);
 
     let chain: Vec<CertificateDer> = rustls_pemfile::certs(&mut chain)
         .collect::<Result<_, _>>()
-        .context("failed to load certs")?;
+        .with_context(|| format!("failed to load certs from {}", tls_cert.display()))?;
 
-    anyhow::ensure!(!chain.is_empty(), "could not find certificate");
+    anyhow::ensure!(
+        !chain.is_empty(),
+        "certificate chain is empty in {}",
+        tls_cert.display()
+    );
 
     // Read PEM private key
-    let keys = fs::File::open(args.tls_key.as_ref().unwrap()).context("failed to open key file")?;
+    let keys =
+        fs::File::open(tls_key).with_context(|| format!("failed to open {}", tls_key.display()))?;
 
     // Read PEM private key
     let key = rustls_pemfile::private_key(&mut io::BufReader::new(keys))
-        .context("failed to load private key")?
-        .context("missing private key")?;
+        .context("failed to read private key")?
+        .context("empty private key")?;
     Ok(CertData { chain, key })
 }
 
@@ -76,8 +65,8 @@ async fn main() -> anyhow::Result<()> {
     let env = env_logger::Env::default().default_filter_or("info");
     env_logger::init_from_env(env);
 
-    Settings::load()?;
     let args = Args::parse();
+    Settings::load(args.config)?;
 
     // Prevents https://github.com/snapview/tokio-tungstenite/issues/336
     rustls::crypto::aws_lc_rs::default_provider()
@@ -86,20 +75,43 @@ async fn main() -> anyhow::Result<()> {
 
     let (service, service_join) = ProxyService::new().start();
 
-    // WebSocket listener
-    let mut listener = if args.ws_secure {
-        let certs = read_certs(&args)?;
-        WebSocketProxyListener::new_secure(
-            service.clone(),
-            args.ws_addr,
-            certs.chain.clone(),
-            certs.key.clone_key(),
-        )
-        .await?
-    } else {
-        WebSocketProxyListener::new(service.clone(), args.ws_addr).await?
-    };
-    let listener_join = listener.start().await?;
+    let settings = Settings::get();
+    if settings.serve.is_empty() {
+        anyhow::bail!("No service endpoints configured. Is config file missing?")
+    }
+
+    let mut join_handles: Vec<JoinHandle<()>> = Vec::new();
+
+    for serve in settings.serve.iter() {
+        match serve.protocol.as_str() {
+            "ws" => {
+                let mut listener =
+                    WebSocketProxyListener::new(service.clone(), serve.bind_address).await?;
+                join_handles.push(listener.start().await?);
+            }
+            "wss" => {
+                if serve.tls_cert.is_none() || serve.tls_key.is_none() {
+                    anyhow::bail!("Missing tls file(s) for wss server");
+                }
+                let certs = read_certs(
+                    serve.tls_cert.as_ref().unwrap(),
+                    serve.tls_key.as_ref().unwrap(),
+                )?;
+                let mut listener = WebSocketProxyListener::new_secure(
+                    service.clone(),
+                    serve.bind_address,
+                    certs.chain,
+                    certs.key,
+                )
+                .await?;
+                join_handles.push(listener.start().await?);
+            }
+            _ => panic!(
+                "Unsupported protocol '{}' in serve directive",
+                serve.protocol
+            ),
+        }
+    }
 
     // WebTransport listener
     /*
@@ -109,7 +121,9 @@ async fn main() -> anyhow::Result<()> {
     });
     */
     service_join.await?;
-    listener_join.await?;
+    for join in join_handles {
+        join.await?;
+    }
 
     Ok(())
 }

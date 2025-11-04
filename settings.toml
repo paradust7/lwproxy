@@ -1,3 +1,22 @@
+[[serve]]
+protocol = "ws"
+bind_address = "0.0.0.0:7777"
+
+# Uncomment to enable secure websocket
+#[[serve]]
+#protocol = "wss"
+#bind_address = "0.0.0.0:7778"
+#tls_cert = "/path/to/certs.pem"
+#tls_key = "/path/to/privkey.pem"
+
+# Uncomment to enable webtransport
+#[[serve]]
+#protocol = "wt"
+#bind_address = "0.0.0.0:1433"
+#tls_cert = "/path/to/certs.pem"
+#tls_key = "/path/to/privkey.pem"
+
+[http_proxy]
 allowed_hosts = [
   "content.minetest.net",
   "servers.minetest.net",
