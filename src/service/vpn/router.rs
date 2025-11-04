@@ -47,15 +47,15 @@ impl VPNRouter {
         code: &VpnCode,
         bind_port: u16,
         relay_tx: UnboundedSender<Bytes>,
-    ) -> Option<ProxyLease> {
+    ) -> anyhow::Result<ProxyLease> {
         match self.codes.get(code) {
             Some(vpn) => {
                 let ip = vpn.assign_ip(code).await;
                 let bind_addr = SocketAddr::new(ip, bind_port);
                 let lease = vpn.add_route(bind_addr, relay_tx).await;
-                Some(lease)
+                Ok(lease)
             }
-            None => None,
+            None => anyhow::bail!("Invalid VPN code"),
         }
     }
 }

@@ -22,4 +22,6 @@ RUN rm -rf src && rm target/release/lwproxy
 COPY --chown=app:app ./src /app/lwproxy/src
 RUN touch src/main.rs && cargo build --release
 
+COPY ./settings.toml ./settings.toml
+
 CMD ["./target/release/lwproxy"]

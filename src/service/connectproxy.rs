@@ -1,6 +1,3 @@
-use std::net::SocketAddr;
-use std::task::RawWakerVTable;
-
 use anyhow::Context;
 use bytes::BufMut;
 use bytes::Bytes;
@@ -19,6 +16,9 @@ use crate::service::lease::LeaseHandler;
 use crate::service::lease::ProxyLease;
 use crate::settings::Settings;
 
+pub static SUCCESS_REPLY: &[u8] =
+    b"HTTP/1.0 200 Connection Established\r\nProxy-agent: Apache/2.4.41 (Ubuntu)\r\n\r\n";
+
 struct ConnectProxyLease {
     transmit: UnboundedSender<Bytes>,
     join: JoinHandle<()>,
@@ -29,7 +29,7 @@ struct ConnectHeader {
     port: u16,
 }
 
-struct ConnectProxy {
+pub struct ConnectProxy {
     relay_tx: Option<UnboundedSender<Bytes>>,
 }
 
@@ -68,7 +68,7 @@ impl ConnectProxy {
             .next()
             .ok_or(anyhow::anyhow!("Missing line for CONNECT"))?;
         let tokens: Vec<&str> = firstline.split_ascii_whitespace().collect();
-        if tokens.len() != 3 || tokens[0] != "CONNECT" || tokens[1] != "HTTP/1.1" {
+        if tokens.len() != 3 || tokens[0] != "CONNECT" || tokens[2] != "HTTP/1.1" {
             anyhow::bail!("Invalid CONNECT line");
         }
         let hostport: Vec<&str> = tokens[1].split(':').collect();
@@ -89,15 +89,14 @@ impl ConnectProxy {
         let mut buffer: Option<BytesMut> = Some(BytesMut::with_capacity(256));
         let mut conn_read: Option<OwnedReadHalf> = None;
         let mut conn_write: Option<OwnedWriteHalf> = None;
-        let mut readbuf: BytesMut = BytesMut::with_capacity(65536);
+        let mut readbuf: Vec<u8> = vec![0; 8192];
         let settings = Settings::get();
         loop {
             tokio::select! {
-                r = conn_read.as_mut().unwrap().read(&mut readbuf), if conn_read.is_some() => {
+                r = async { conn_read.as_mut().unwrap().read(&mut readbuf).await }, if conn_read.is_some() => {
                     let sz = r?;
-                    if let Some(iconn_write) = &mut conn_write {
-                        iconn_write.write(&readbuf[0..sz]).await?;
-                    }
+                    // TODO: Is there a way to reuse buffers here?
+                    relay.send(Bytes::from(readbuf[..sz].to_owned()))?;
                 },
                 r = receiver.recv() => {
                     match &r {
@@ -113,27 +112,36 @@ impl ConnectProxy {
                                     if !settings.allowed_hosts.contains(&header.host) {
                                         anyhow::bail!("Host not allowed in CONNECT proxy");
                                     }
-                                    let iconn = TcpStream::connect((header.host, header.port)).await?;
+                                    let desc: (&str, u16) = (&header.host, header.port);
+                                    let iconn = TcpStream::connect(desc).await?;
+
+                                    log::info!("ConnectProxy proxying to {}:{}", header.host, header.port);
+
                                     let (iconn_read, mut iconn_write) = iconn.into_split();
                                     if !remainder.is_empty() {
                                         iconn_write.write(&remainder).await?;
                                     }
                                     conn_read = Some(iconn_read);
                                     conn_write = Some(iconn_write);
+
+                                    relay.send(Bytes::from(SUCCESS_REPLY))?;
+
                                 } else {
                                     // Keep reading more of the header
                                     buffer = Some(buf);
                                 }
                             }
                         },
-                        None => {},
+                        None => {
+                            anyhow::bail!("Client disconnected");
+                        },
                     }
                 }
             }
         }
     }
 
-    pub fn to_lease(mut self) -> ProxyLease {
+    pub fn into_lease(mut self) -> ProxyLease {
         let mut relay_tx = self.relay_tx.take().unwrap();
         let (tx, rx) = unbounded_channel();
         let join = tokio::spawn(async move {
@@ -158,7 +166,8 @@ impl LeaseHandler for ConnectProxyLease {
     }
 
     fn close(&self) -> anyhow::Result<()> {
-        todo!()
+        // Dropping transmit will trigger disconnect
+        Ok(())
     }
 
     fn is_live(&self) -> bool {

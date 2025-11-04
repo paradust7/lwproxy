@@ -1,4 +1,6 @@
+use std::net::IpAddr;
 use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 
 use crate::service::lease::ProxyLease;
 use crate::service::vpn::vpn::VpnCode;
@@ -155,7 +157,12 @@ impl WebSocketClientRunner {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         match msg {
-            Message::Text(utf8_bytes) => self.handle_command(utf8_bytes, writer).await?,
+            Message::Text(utf8_bytes) => {
+                if self.lease.is_some() {
+                    anyhow::bail!("Command sent at improper time")
+                }
+                self.handle_command(utf8_bytes, writer).await?
+            }
             Message::Binary(bytes) => self.handle_datagram(bytes).await?,
             Message::Ping(bytes) => writer.send(Message::Pong(bytes)).await?,
             Message::Pong(_bytes) => {}
@@ -229,8 +236,17 @@ impl WebSocketClientRunner {
                 };
                 let ip: Ipv4Addr = tokens[3].parse().context("Bad address in PROXY command")?;
                 let port: u16 = tokens[4].parse().context("Bad port in PROXY command")?;
-                //self.service.route()
-                todo!();
+                let addr: SocketAddr = SocketAddr::new(IpAddr::V4(ip), port);
+                self.lease = Some(
+                    self.service
+                        .route(addr, is_udp, self.relay_tx.take().unwrap())
+                        .await?,
+                );
+                if self.lease.is_some() {
+                    response = format!("PROXY OK");
+                } else {
+                    response = format!("PROXY FAILED");
+                }
             }
             Some(&"MAKEVPN") => {
                 if tokens.len() != 2 {
@@ -269,10 +285,11 @@ impl WebSocketClientRunner {
                 let bind_port: u16 = tokens[5].parse().context("Bind port parse")?;
                 let code = VpnCode::from(hexcode).context("VpnCode parse error")?;
 
-                self.lease = self
-                    .service
-                    .vpn_route(&code, bind_port, self.relay_tx.take().unwrap())
-                    .await;
+                self.lease = Some(
+                    self.service
+                        .vpn_route(&code, bind_port, self.relay_tx.take().unwrap())
+                        .await?,
+                );
                 if self.lease.is_some() {
                     response = format!("BIND OK");
                 } else {

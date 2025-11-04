@@ -1,12 +1,17 @@
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
+use crate::service::connectproxy::ConnectProxy;
+use crate::service::dnsproxy::DNSProxy;
 use crate::service::lease::ProxyLease;
+use crate::service::udpproxy::UdpProxy;
 use crate::service::vpn::vpn::VpnCode;
 use crate::service::vpn::vpn::VpnConfig;
 
@@ -15,6 +20,9 @@ use super::client::ProxyClient;
 use super::client::ProxyClientHandle;
 use super::client::RemoteInfo;
 use super::vpn::router::VPNRouter;
+
+static CONNECT_PROXY: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
+static DNS_PROXY: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 53);
 
 #[derive(Clone)]
 pub struct ProxyServiceHandle {
@@ -52,7 +60,7 @@ impl ProxyServiceHandle {
         code: &VpnCode,
         bind_port: u16,
         relay_tx: UnboundedSender<Bytes>,
-    ) -> Option<ProxyLease> {
+    ) -> anyhow::Result<ProxyLease> {
         let guard = self.inner.lock().await;
         guard.vpn_route(code, bind_port, relay_tx).await
     }
@@ -62,7 +70,7 @@ impl ProxyServiceHandle {
         addr: SocketAddr,
         is_udp: bool,
         relay_tx: UnboundedSender<Bytes>,
-    ) -> Option<ProxyLease> {
+    ) -> anyhow::Result<ProxyLease> {
         let guard = self.inner.lock().await;
         guard.route(addr, is_udp, relay_tx).await
     }
@@ -128,7 +136,7 @@ impl ProxyService {
         code: &VpnCode,
         bind_port: u16,
         relay_tx: UnboundedSender<Bytes>,
-    ) -> Option<ProxyLease> {
+    ) -> anyhow::Result<ProxyLease> {
         self.vpn_router.route(code, bind_port, relay_tx).await
     }
 
@@ -137,7 +145,15 @@ impl ProxyService {
         addr: SocketAddr,
         is_udp: bool,
         relay_tx: UnboundedSender<Bytes>,
-    ) -> Option<ProxyLease> {
-        None
+    ) -> anyhow::Result<ProxyLease> {
+        if !is_udp && addr == CONNECT_PROXY {
+            Ok(ConnectProxy::new(relay_tx).into_lease())
+        } else if !is_udp && addr == DNS_PROXY {
+            Ok(DNSProxy::new(relay_tx).into_lease())
+        } else if is_udp {
+            Ok(UdpProxy::new(addr, relay_tx).into_lease())
+        } else {
+            anyhow::bail!("Invalid proxy request")
+        }
     }
 }
