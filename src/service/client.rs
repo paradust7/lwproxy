@@ -1,12 +1,10 @@
-use bytes::Bytes;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum RemoteInfo {
-    WebSocket(std::net::SocketAddr),
-    WebTransport(std::net::SocketAddr),
-}
+use std::sync::atomic::AtomicU64;
+static CLIENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 pub type ClientId = u64;
 
 #[derive(Clone)]
@@ -23,12 +21,13 @@ impl ProxyClientHandle {
 
 pub struct ProxyClient {
     id: ClientId,
-    remote: RemoteInfo,
+    remote_addr: SocketAddr,
 }
 
 impl ProxyClient {
-    pub fn new(id: ClientId, remote: RemoteInfo) -> Self {
-        Self { id, remote }
+    pub fn new(remote_addr: SocketAddr) -> Self {
+        let id = CLIENT_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self { id, remote_addr }
     }
 
     pub fn into_handle(self) -> ProxyClientHandle {
@@ -38,18 +37,7 @@ impl ProxyClient {
         }
     }
 
-    pub fn id(&self) -> u64 {
+    pub fn id(&self) -> ClientId {
         self.id
-    }
-
-    pub fn clone(&self) -> Self {
-        ProxyClient {
-            id: self.id,
-            remote: self.remote,
-        }
-    }
-
-    pub fn handle_datagram(&self, buf: Bytes) {
-        panic!("unimpl")
     }
 }

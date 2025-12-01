@@ -144,7 +144,6 @@ impl Vpn {
         self.join = Some(tokio::spawn(async move {
             while let Some(packet) = receiver.recv().await {
                 match &packet {
-                    VpnPacket::VpnStop => break,
                     VpnPacket::VpnDisconnect(addr) => {
                         let mut guard = runtime.lock().await;
                         guard.rtable.remove(&addr);
@@ -167,14 +166,6 @@ impl Vpn {
             }
             log::info!("VPN {}:{} stopped", config.server_code, config.client_code);
         }));
-    }
-
-    pub async fn stop(&mut self) -> anyhow::Result<()> {
-        if let Some(tx) = &self.transmitter {
-            let _ = tx.send(VpnPacket::VpnStop);
-        };
-        self.join.take().unwrap().await?;
-        Ok(())
     }
 
     pub async fn assign_ip(&mut self, code: &VpnCode) -> IpAddr {

@@ -45,7 +45,7 @@ impl ConnectProxy {
         buf.windows(4).position(|w| w == b"\r\n\r\n").is_some()
     }
 
-    pub fn parse_header(buf: Bytes) -> anyhow::Result<(ConnectHeader, Bytes)> {
+    fn parse_header(buf: Bytes) -> anyhow::Result<(ConnectHeader, Bytes)> {
         // In HTTP, the client is allowed to send request data beyond the CONNECT header before it receives a response.
         // If some of it ended up in the buffer, chop it off.
         let header_ending = buf
@@ -82,7 +82,7 @@ impl ConnectProxy {
     }
 
     pub async fn run(
-        mut self,
+        self,
         mut receiver: UnboundedReceiver<Bytes>,
         relay: &mut UnboundedSender<Bytes>,
     ) -> anyhow::Result<()> {

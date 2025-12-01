@@ -18,7 +18,6 @@ use crate::service::vpn::vpn::VpnConfig;
 use super::client::ClientId;
 use super::client::ProxyClient;
 use super::client::ProxyClientHandle;
-use super::client::RemoteInfo;
 use super::vpn::router::VPNRouter;
 
 static CONNECT_PROXY: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
@@ -35,14 +34,14 @@ impl ProxyServiceHandle {
             inner: Arc::new(Mutex::new(inner)),
         }
     }
-    pub async fn new_client(&self, remote: RemoteInfo) -> ProxyClientHandle {
+    pub async fn new_client(&self, protocol: &str, remote_addr: SocketAddr) -> ProxyClientHandle {
         let mut guard = self.inner.lock().await;
-        guard.new_client(remote).await
+        guard.new_client(protocol, remote_addr).await
     }
 
-    pub async fn remove_client(&self, client: ProxyClientHandle) {
+    pub async fn remove_client(&self, client: ProxyClientHandle, err: Option<anyhow::Error>) {
         let mut guard = self.inner.lock().await;
-        guard.remove_client(client).await
+        guard.remove_client(client, err).await
     }
 
     pub async fn make_vpn(&self, game: &str) -> Arc<VpnConfig> {
@@ -80,7 +79,6 @@ impl ProxyServiceHandle {
 }
 
 pub struct ProxyService {
-    next_client_id: ClientId,
     clients: HashMap<ClientId, ProxyClientHandle>,
     vpn_router: VPNRouter,
 }
@@ -88,7 +86,6 @@ pub struct ProxyService {
 impl ProxyService {
     pub fn new() -> ProxyService {
         Self {
-            next_client_id: 1,
             clients: HashMap::new(),
             vpn_router: VPNRouter::new(),
         }
@@ -102,17 +99,32 @@ impl ProxyService {
         )
     }
 
-    pub async fn new_client(&mut self, remote: RemoteInfo) -> ProxyClientHandle {
-        let id = self.next_client_id;
-        self.next_client_id += 1;
-        let client = ProxyClient::new(id, remote).into_handle();
-        self.clients.insert(id, client.clone());
+    pub async fn new_client(
+        &mut self,
+        protocol: &str,
+        remote_addr: SocketAddr,
+    ) -> ProxyClientHandle {
+        let client = ProxyClient::new(remote_addr).into_handle();
+        self.clients.insert(client.id(), client.clone());
+        log::info!(
+            "C{}: Client connected from {} using {}",
+            client.id(),
+            remote_addr,
+            protocol
+        );
         client
     }
 
-    pub async fn remove_client(&mut self, client: ProxyClientHandle) {
-        match self.clients.remove(&client.id()) {
-            Some(_) => (),
+    pub async fn remove_client(&mut self, client: ProxyClientHandle, err: Option<anyhow::Error>) {
+        let id = client.id();
+        match self.clients.remove(&id) {
+            Some(_) => {
+                if let Some(err) = err {
+                    log::info!("C{}: Disconnected due to error ({})", id, err);
+                } else {
+                    log::info!("C{}: Disconnected", id);
+                }
+            }
             None => panic!("Integrity error, removed invalid client"),
         };
     }

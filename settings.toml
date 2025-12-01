@@ -9,12 +9,19 @@ bind_address = "0.0.0.0:7777"
 #tls_cert = "/path/to/certs.pem"
 #tls_key = "/path/to/privkey.pem"
 
-# Uncomment to enable webtransport
+# Uncomment to enable secure webtransport
 #[[serve]]
 #protocol = "wt"
 #bind_address = "0.0.0.0:1433"
 #tls_cert = "/path/to/certs.pem"
 #tls_key = "/path/to/privkey.pem"
+
+# Use tls_self to create and use a self-signed certificate.
+# This provides no security and should only be used for testing.
+[[serve]]
+protocol = "wt"
+bind_address = "0.0.0.0:1433"
+tls_self = true
 
 [http_proxy]
 allowed_hosts = [

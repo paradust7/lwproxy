@@ -1,8 +1,7 @@
 use super::runner::WebSocketProxyRunner;
 use super::runner::WebSocketProxyRunnerHandle;
 use crate::service::ProxyServiceHandle;
-use rustls::pki_types::CertificateDer;
-use rustls::pki_types::PrivateKeyDer;
+use crate::settings::TLSCert;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -31,12 +30,11 @@ impl WebSocketProxyListener {
     pub async fn new_secure(
         service: ProxyServiceHandle,
         bind_addr: std::net::SocketAddr,
-        chain: Vec<CertificateDer<'static>>,
-        key: PrivateKeyDer<'static>,
+        cert: TLSCert,
     ) -> anyhow::Result<Self> {
         let config = rustls::ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(chain, key)?;
+            .with_single_cert(cert.chain, cert.key)?;
         let acceptor = TlsAcceptor::from(Arc::new(config));
         Ok(Self {
             service,

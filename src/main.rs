@@ -1,62 +1,24 @@
-use std::fs;
-use std::io;
 use std::path;
 
-use anyhow::Context;
-
 use clap::Parser;
-use config::Config;
-use rustls::pki_types::CertificateDer;
 
 mod service;
 mod settings;
 mod websocket;
 mod webtransport;
 
-use rustls::pki_types::PrivateKeyDer;
 use tokio::task::JoinHandle;
 use websocket::listener::WebSocketProxyListener;
 
 use crate::service::ProxyService;
 use crate::settings::Settings;
+use crate::webtransport::listener::WebTransportProxyListener;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     #[arg(long, default_value = "settings.toml")]
     pub config: path::PathBuf,
-}
-
-pub struct CertData {
-    pub chain: Vec<CertificateDer<'static>>,
-    pub key: PrivateKeyDer<'static>,
-}
-
-fn read_certs(tls_cert: &path::PathBuf, tls_key: &path::PathBuf) -> anyhow::Result<CertData> {
-    // Read PEM certificate chain
-    let chain = fs::File::open(tls_cert)
-        .with_context(|| format!("failed to open {}", tls_cert.display()))?;
-    let mut chain = io::BufReader::new(chain);
-
-    let chain: Vec<CertificateDer> = rustls_pemfile::certs(&mut chain)
-        .collect::<Result<_, _>>()
-        .with_context(|| format!("failed to load certs from {}", tls_cert.display()))?;
-
-    anyhow::ensure!(
-        !chain.is_empty(),
-        "certificate chain is empty in {}",
-        tls_cert.display()
-    );
-
-    // Read PEM private key
-    let keys =
-        fs::File::open(tls_key).with_context(|| format!("failed to open {}", tls_key.display()))?;
-
-    // Read PEM private key
-    let key = rustls_pemfile::private_key(&mut io::BufReader::new(keys))
-        .context("failed to read private key")?
-        .context("empty private key")?;
-    Ok(CertData { chain, key })
 }
 
 #[tokio::main]
@@ -90,20 +52,17 @@ async fn main() -> anyhow::Result<()> {
                 join_handles.push(listener.start().await?);
             }
             "wss" => {
-                if serve.tls_cert.is_none() || serve.tls_key.is_none() {
-                    anyhow::bail!("Missing tls file(s) for wss server");
-                }
-                let certs = read_certs(
-                    serve.tls_cert.as_ref().unwrap(),
-                    serve.tls_key.as_ref().unwrap(),
-                )?;
-                let mut listener = WebSocketProxyListener::new_secure(
-                    service.clone(),
-                    serve.bind_address,
-                    certs.chain,
-                    certs.key,
-                )
-                .await?;
+                let certs = serve.read_certs()?;
+                let mut listener =
+                    WebSocketProxyListener::new_secure(service.clone(), serve.bind_address, certs)
+                        .await?;
+                join_handles.push(listener.start().await?);
+            }
+            "wt" => {
+                let certs = serve.read_certs()?;
+                let mut listener =
+                    WebTransportProxyListener::new(service.clone(), serve.bind_address, certs)
+                        .await?;
                 join_handles.push(listener.start().await?);
             }
             _ => panic!(

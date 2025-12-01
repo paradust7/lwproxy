@@ -13,7 +13,6 @@ pub struct VpnPacketUdp {
     pub data: Bytes,
 }
 pub enum VpnPacket {
-    VpnStop,
     VpnDisconnect(SocketAddr),
     Udp(VpnPacketUdp),
 }
