@@ -95,6 +95,12 @@ impl ConnectProxy {
             tokio::select! {
                 r = async { conn_read.as_mut().unwrap().read(&mut readbuf).await }, if conn_read.is_some() => {
                     let sz = r?;
+                    if sz == 0 {
+                        // The remote closed the connection. Anything already
+                        // relayed stays queued for the client, which sees the
+                        // relay shut down once this task drops it.
+                        return Ok(());
+                    }
                     // TODO: Is there a way to reuse buffers here?
                     relay.send(Bytes::from(readbuf[..sz].to_owned()))?;
                 },
@@ -102,7 +108,7 @@ impl ConnectProxy {
                     match &r {
                         Some(bytes) => {
                             if let Some(iconn_write) = &mut conn_write {
-                                iconn_write.write(&bytes).await?;
+                                iconn_write.write_all(&bytes).await?;
                             } else if let Some(mut buf) = buffer.take() {
                                 buf.put_slice(bytes);
                                 // Check to see if the command is full.
@@ -119,7 +125,7 @@ impl ConnectProxy {
 
                                     let (iconn_read, mut iconn_write) = iconn.into_split();
                                     if !remainder.is_empty() {
-                                        iconn_write.write(&remainder).await?;
+                                        iconn_write.write_all(&remainder).await?;
                                     }
                                     conn_read = Some(iconn_read);
                                     conn_write = Some(iconn_write);
