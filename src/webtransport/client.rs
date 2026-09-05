@@ -1,5 +1,6 @@
 use anyhow::Context;
 use bytes::Bytes;
+use bytes::BytesMut;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use tokio::sync::mpsc::UnboundedSender;
@@ -22,6 +23,8 @@ pub struct WebTransportClientRunner {
     send: Option<SendStream>,
     relay_tx: Option<UnboundedSender<Bytes>>,
     relay_udp: bool,
+    // Partial command, waiting for the rest of the line to arrive.
+    cmdbuf: BytesMut,
 }
 
 impl WebTransportClientRunner {
@@ -32,6 +35,7 @@ impl WebTransportClientRunner {
             send: None,
             relay_tx: None,
             relay_udp: false,
+            cmdbuf: BytesMut::new(),
         }
     }
 
@@ -81,8 +85,16 @@ impl WebTransportClientRunner {
                     anyhow::bail!("Not expecting unidirectional stream");
                 },
                 data = async { recv.as_mut().unwrap().fill_buf().await }, if recv.is_some() => {
-                    let consumed = self.handle_data(client, data?).await?;
-                    recv.as_mut().unwrap().consume(consumed);
+                    let data = data?;
+                    let available = data.len();
+                    if available == 0 {
+                        // The client closed the stream. Stop polling it, or the
+                        // read would complete immediately forever.
+                        recv = None;
+                    } else {
+                        self.handle_data(client, data).await?;
+                        recv.as_mut().unwrap().consume(available);
+                    }
                 },
                 res = session.read_datagram() => {
                     let msg = res?;
@@ -120,23 +132,32 @@ impl WebTransportClientRunner {
         }
     }
 
-    async fn handle_data(
-        &mut self,
-        client: &ProxyClientHandle,
-        data: &[u8],
-    ) -> anyhow::Result<usize> {
-        if let Some(lease) = &self.lease {
-            if self.relay_udp {
-                anyhow::bail!("Got data on a datagram-only session");
-            }
-            lease.send(Bytes::copy_from_slice(data))?;
-            return Ok(data.len());
+    /// Handle bytes arriving on the command stream. All of `data` is consumed,
+    /// with anything short of a full command held in cmdbuf until the rest of
+    /// it arrives.
+    async fn handle_data(&mut self, client: &ProxyClientHandle, data: &[u8]) -> anyhow::Result<()> {
+        if self.lease.is_some() {
+            return self.relay_stream(data);
         }
+        self.cmdbuf.extend_from_slice(data);
         // When there's no lease, interpret the data as commands separated by \n
-        if let Some(nlpos) = data.iter().position(|&b| b == b'\n') {
-            let cmd = &data[..nlpos];
+        while self.lease.is_none() {
+            let nlpos = match self.cmdbuf.iter().position(|&b| b == b'\n') {
+                Some(nlpos) => nlpos,
+                None => {
+                    if self.cmdbuf.len() >= MAX_COMMAND_SIZE {
+                        anyhow::bail!("Command grew too large in buffer")
+                    }
+                    // Wait for the rest of the command.
+                    return Ok(());
+                }
+            };
+            // Take the command and the newline terminating it.
+            let cmd = self.cmdbuf.split_to(nlpos + 1);
             let proc = CommandProcessor::new(&self.service, client);
-            let result = proc.handle_command(cmd, &mut self.relay_tx).await?;
+            let result = proc
+                .handle_command(&cmd[..nlpos], &mut self.relay_tx)
+                .await?;
             if result.new_lease.is_some() {
                 self.lease = result.new_lease;
                 self.relay_udp = result.relay_udp;
@@ -147,12 +168,24 @@ impl WebTransportClientRunner {
                 .write_all(result.response.as_bytes())
                 .await?;
             self.send.as_mut().unwrap().write_all(b"\n").await?;
-            return Ok(nlpos);
         }
-        if data.len() >= MAX_COMMAND_SIZE {
-            anyhow::bail!("Command grew too large in buffer")
+        // Whatever followed the command that established the lease is stream data.
+        let remainder = self.cmdbuf.split();
+        self.relay_stream(&remainder)
+    }
+
+    fn relay_stream(&self, data: &[u8]) -> anyhow::Result<()> {
+        if data.is_empty() {
+            return Ok(());
         }
-        return Ok(0);
+        if self.relay_udp {
+            anyhow::bail!("Got data on a datagram-only session");
+        }
+        self.lease
+            .as_ref()
+            .unwrap()
+            .send(Bytes::copy_from_slice(data))?;
+        Ok(())
     }
 
     async fn handle_datagram(&mut self, msg: Bytes) -> anyhow::Result<()> {
