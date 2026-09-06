@@ -1,6 +1,10 @@
 [[serve]]
 protocol = "ws"
-bind_address = "0.0.0.0:7777"
+# Binding to [::] accepts both IPv6 and IPv4 clients on a dual stack host,
+# where an IPv4 client shows up as an IPv4-mapped address. A host that does
+# not allow that (a container without IPv6, or bindv6only set) needs one
+# serve block per family instead, listening on 0.0.0.0 and on [::].
+bind_address = "[::]:7777"
 
 # Uncomment to enable secure websocket
 #[[serve]]
@@ -18,14 +22,13 @@ bind_address = "0.0.0.0:7777"
 
 # Use tls_self to create and use a self-signed certificate.
 # This provides no security and should only be used for testing.
-[[serve]]
-protocol = "wt"
-bind_address = "0.0.0.0:1433"
-tls_self = true
+#[[serve]]
+#protocol = "wt"
+#bind_address = "0.0.0.0:1433"
+#tls_self = true
 
 [http_proxy]
 allowed_hosts = [
-  "content.minetest.net",
-  "servers.minetest.net",
   "content.luanti.org",
+  "servers.luanti.org",
 ]

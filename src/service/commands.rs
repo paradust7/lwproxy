@@ -1,10 +1,9 @@
-use crate::service::vpn::vpn::VpnCode;
+use crate::service::net::code::Passcode;
 use crate::service::ProxyClientHandle;
 use crate::service::ProxyServiceHandle;
 use anyhow::Context;
 use bytes::Bytes;
 use std::net::IpAddr;
-use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -61,79 +60,62 @@ impl<'a> CommandProcessor<'a> {
                 if tokens.len() != 5 {
                     anyhow::bail!("Bad args to PROXY command");
                 }
-                if tokens[1] != "IPV4" {
-                    anyhow::bail!("Bad protocol in PROXY command")
-                }
-                let is_udp = match tokens[2] {
-                    "TCP" => false,
-                    "UDP" => true,
+                let want_ipv6 = match tokens[1] {
+                    "IPV4" => false,
+                    "IPV6" => true,
+                    _ => anyhow::bail!("Bad protocol in PROXY command"),
+                };
+                match tokens[2] {
+                    "TCP" => {}
+                    "UDP" => anyhow::bail!("UDP is carried on a bound link, not PROXY"),
                     _ => anyhow::bail!("Bad transport in PROXY command"),
                 };
-                let ip: Ipv4Addr = tokens[3].parse().context("Bad address in PROXY command")?;
+                let ip: IpAddr = tokens[3].parse().context("Bad address in PROXY command")?;
+                anyhow::ensure!(
+                    ip.is_ipv6() == want_ipv6,
+                    "Address family does not match PROXY command"
+                );
                 let port: u16 = tokens[4].parse().context("Bad port in PROXY command")?;
-                let addr: SocketAddr = SocketAddr::new(IpAddr::V4(ip), port);
+                let addr: SocketAddr = SocketAddr::new(ip, port);
                 if relay_tx.is_none() {
                     anyhow::bail!("PROXY command but relay is missing");
                 }
-                new_lease = Some(
-                    self.service
-                        .route(addr, is_udp, relay_tx.take().unwrap())
-                        .await?,
-                );
-                relay_udp = is_udp;
-                if new_lease.is_some() {
-                    response = format!("PROXY OK");
-                } else {
-                    response = format!("PROXY FAILED");
-                }
+                new_lease = Some(self.service.route(addr, relay_tx.take().unwrap()).await?);
+                response = format!("PROXY OK");
             }
-            Some(&"MAKEVPN") => {
-                if tokens.len() != 2 {
-                    anyhow::bail!("Bad args to MAKEVPN");
+            Some(&"NEWADDR") => {
+                if tokens.len() != 1 {
+                    anyhow::bail!("Bad args to NEWADDR");
                 }
-                let game = tokens[1];
-                let vpn_config = self.service.make_vpn(game).await;
-                response = format!(
-                    "NEWVPN {} {}",
-                    &vpn_config.server_code, &vpn_config.client_code
-                );
+                let (address, passcode) = self.service.assign().await;
+                response = format!("ADDR {} {}", address, passcode);
             }
-            Some(&"READVPN") => {
-                if tokens.len() != 2 {
-                    anyhow::bail!("Bad args to READVPN");
-                }
-                let hexcode = tokens[1];
-                let vpn = self.service.get_vpn_info(hexcode).await;
-                let game: &str = match &vpn {
-                    Some(vpn) => &vpn.game,
-                    None => &"_expired_",
-                };
-                response = format!("VPNINFO {}", game);
-            }
-            Some(&"VPN") => {
+            Some(&"BIND") => {
                 if relay_tx.is_none() {
-                    anyhow::bail!("VPN command with missing relay");
+                    anyhow::bail!("BIND command with missing relay");
                 }
-                if tokens.len() != 6 {
-                    anyhow::bail!("Invalid VPN command length");
+                if tokens.len() != 4 {
+                    anyhow::bail!("Bad args to BIND");
                 }
-                let hexcode = tokens[1];
-                anyhow::ensure!(tokens[2] == "BIND", "Invalid VPN action");
-                anyhow::ensure!(tokens[3] == "IPV4", "Invalid VPN network type");
-                anyhow::ensure!(tokens[4] == "UDP", "Invalid VPN transport layer");
-                let bind_port: u16 = tokens[5].parse().context("Bind port parse")?;
-                let code = VpnCode::from(hexcode).context("VpnCode parse error")?;
-
-                new_lease = Some(
-                    self.service
-                        .vpn_route(&code, bind_port, relay_tx.take().unwrap())
-                        .await?,
-                );
-                relay_udp = true;
-                if new_lease.is_some() {
-                    response = format!("BIND OK");
-                } else {
-                    response = format!("BIND FAILED");
+                let passcode = Passcode::parse(tokens[1]).context("Bad passcode in BIND")?;
+                anyhow::ensure!(tokens[2] == "UDP", "Only UDP can be bound");
+                let bind_port: u16 = tokens[3].parse().context("Bad port in BIND")?;
+                let relay = relay_tx.as_ref().unwrap().clone();
+                match self.service.bind(&passcode, bind_port, relay).await {
+                    Ok(lease) => {
+                        relay_tx.take();
+                        new_lease = Some(lease);
+                        relay_udp = true;
+                        response = format!("BIND OK");
+                    }
+                    Err(err) => {
+                        // An assignment that has expired, or that this proxy
+                        // never made, is how a client learns to ask for a new
+                        // address. It is answered, not fatal, and the relay is
+                        // left in place so the client can try again here.
+                        log::info!("C{}: BIND refused ({})", self.client.id(), err);
+                        response = format!("BIND FAILED");
+                    }
                 }
             }
             _ => {

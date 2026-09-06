@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
@@ -11,17 +11,18 @@ use tokio::task::JoinHandle;
 use crate::service::connectproxy::ConnectProxy;
 use crate::service::dnsproxy::DNSProxy;
 use crate::service::lease::ProxyLease;
-use crate::service::udpproxy::UdpProxy;
-use crate::service::vpn::vpn::VpnCode;
-use crate::service::vpn::vpn::VpnConfig;
+use crate::service::net::code::Passcode;
+use crate::service::net::code::PROXY_ADDRESS;
+use crate::service::net::network::Network;
 
 use super::client::ClientId;
 use super::client::ProxyClient;
 use super::client::ProxyClientHandle;
-use super::vpn::router::VPNRouter;
 
-static CONNECT_PROXY: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 8080);
-static DNS_PROXY: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 53);
+// The proxy's own services, reached over TCP at its address on the private
+// network.
+static CONNECT_PROXY: SocketAddr = SocketAddr::new(IpAddr::V6(PROXY_ADDRESS), 8080);
+static DNS_PROXY: SocketAddr = SocketAddr::new(IpAddr::V6(PROXY_ADDRESS), 53);
 
 #[derive(Clone)]
 pub struct ProxyServiceHandle {
@@ -44,34 +45,28 @@ impl ProxyServiceHandle {
         guard.remove_client(client, err).await
     }
 
-    pub async fn make_vpn(&self, game: &str) -> Arc<VpnConfig> {
-        let mut guard = self.inner.lock().await;
-        guard.make_vpn(game).await
+    pub async fn assign(&self) -> (Ipv6Addr, Passcode) {
+        let guard = self.inner.lock().await;
+        guard.network.assign()
     }
 
-    pub async fn get_vpn_info(&self, code: &str) -> Option<Arc<VpnConfig>> {
-        let mut guard = self.inner.lock().await;
-        guard.get_vpn_info(code).await
-    }
-
-    pub async fn vpn_route(
+    pub async fn bind(
         &self,
-        code: &VpnCode,
+        passcode: &Passcode,
         bind_port: u16,
         relay_tx: UnboundedSender<Bytes>,
     ) -> anyhow::Result<ProxyLease> {
         let guard = self.inner.lock().await;
-        guard.vpn_route(code, bind_port, relay_tx).await
+        guard.network.bind(passcode, bind_port, relay_tx)
     }
 
     pub async fn route(
         &self,
         addr: SocketAddr,
-        is_udp: bool,
         relay_tx: UnboundedSender<Bytes>,
     ) -> anyhow::Result<ProxyLease> {
         let guard = self.inner.lock().await;
-        guard.route(addr, is_udp, relay_tx).await
+        guard.route(addr, relay_tx).await
     }
     async fn run(self) {
         // Nothing yet
@@ -80,14 +75,14 @@ impl ProxyServiceHandle {
 
 pub struct ProxyService {
     clients: HashMap<ClientId, ProxyClientHandle>,
-    vpn_router: VPNRouter,
+    network: Arc<Network>,
 }
 
 impl ProxyService {
     pub fn new() -> ProxyService {
         Self {
             clients: HashMap::new(),
-            vpn_router: VPNRouter::new(),
+            network: Arc::new(Network::new()),
         }
     }
 
@@ -129,43 +124,19 @@ impl ProxyService {
         };
     }
 
-    pub async fn make_vpn(&mut self, game: &str) -> Arc<VpnConfig> {
-        self.vpn_router.make_vpn(game).await
-    }
-
-    pub async fn get_vpn_info(&mut self, hexcode: &str) -> Option<Arc<VpnConfig>> {
-        match VpnCode::from(hexcode) {
-            Ok(code) => self.vpn_router.get_vpn_info(&code).await,
-            Err(_) => {
-                // Ignore invalid vpn codes
-                None
-            }
-        }
-    }
-
-    pub async fn vpn_route(
-        &self,
-        code: &VpnCode,
-        bind_port: u16,
-        relay_tx: UnboundedSender<Bytes>,
-    ) -> anyhow::Result<ProxyLease> {
-        self.vpn_router.route(code, bind_port, relay_tx).await
-    }
-
+    /// PROXY reaches the proxy's own services and nothing else. Everything
+    /// else a client talks to is UDP, which goes over a bound link.
     pub async fn route(
         &self,
         addr: SocketAddr,
-        is_udp: bool,
         relay_tx: UnboundedSender<Bytes>,
     ) -> anyhow::Result<ProxyLease> {
-        if !is_udp && addr == CONNECT_PROXY {
+        if addr == CONNECT_PROXY {
             Ok(ConnectProxy::new(relay_tx).into_lease())
-        } else if !is_udp && addr == DNS_PROXY {
+        } else if addr == DNS_PROXY {
             Ok(DNSProxy::new(relay_tx).into_lease())
-        } else if is_udp {
-            Ok(UdpProxy::new(addr, relay_tx).into_lease())
         } else {
-            anyhow::bail!("Invalid proxy request")
+            anyhow::bail!("Only the proxy's own services can be reached with PROXY")
         }
     }
 }
